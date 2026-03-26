@@ -15,9 +15,11 @@ type ResponseSequences = Vec<(String, VecDeque<String>)>;
 ///
 /// Supports first-match response rules, sequenced responses, failure injection,
 /// rate limiting, and call counting.
+#[derive(Clone)]
 pub struct MockLLMBackend {
     responses: Arc<RwLock<Vec<(String, String)>>>,
     fallback: String,
+    infer_history: Arc<RwLock<Vec<String>>>,
     registered: Arc<RwLock<HashSet<String>>>,
     loaded: Arc<RwLock<HashSet<String>>>,
     memory_threshold: Arc<RwLock<u64>>,
@@ -46,6 +48,7 @@ impl MockLLMBackend {
         Self {
             responses: Arc::new(RwLock::new(Vec::new())),
             fallback: "Mock fallback response.".into(),
+            infer_history: Arc::new(RwLock::new(Vec::new())),
             registered: Arc::new(RwLock::new(HashSet::new())),
             loaded: Arc::new(RwLock::new(HashSet::new())),
             memory_threshold: Arc::new(RwLock::new(u64::MAX)),
@@ -69,6 +72,26 @@ impl MockLLMBackend {
     /// Replace the fallback response returned when no rule matches.
     pub fn set_fallback(&mut self, response: &str) {
         self.fallback = response.to_string();
+    }
+
+    /// Return all prompts seen by `infer()` in call order.
+    pub fn infer_history(&self) -> Vec<String> {
+        self.infer_history.read().expect("lock poisoned").clone()
+    }
+
+    /// Count how many recorded prompts contain the given substring.
+    pub fn infer_count_for(&self, prompt_substring: &str) -> usize {
+        self.infer_history
+            .read()
+            .expect("lock poisoned")
+            .iter()
+            .filter(|prompt| prompt.contains(prompt_substring))
+            .count()
+    }
+
+    /// Clear the stored prompt history.
+    pub fn clear_infer_history(&self) {
+        self.infer_history.write().expect("lock poisoned").clear();
     }
 
     /// Queue errors to be returned by the next N `infer()` calls (FIFO).
@@ -209,6 +232,10 @@ impl ModelOrchestrator for MockLLMBackend {
 
     async fn infer(&self, _model_id: &str, input: &str) -> OrchestratorResult<String> {
         self.call_count.fetch_add(1, Ordering::Relaxed);
+        self.infer_history
+            .write()
+            .expect("lock poisoned")
+            .push(input.to_string());
 
         // 1. Drain failure queue (FIFO)
         {
